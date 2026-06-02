@@ -51,9 +51,11 @@ const conversationHistory = new Map<string, { role: "user" | "assistant"; conten
 const seenScriptIds = new Set<string>();
 let notifyInitialized = false;
 
+// script オブジェクトは不要 — slug だけあれば閲覧数をAPIから取得できる
 type ViewTracker =
   | { type: "search"; slug: string; channelId: string }
-  | { type: "notify"; slug: string; channelId: string; script: import("./scriptblox.js").ScriptResult };
+  | { type: "notify"; slug: string; channelId: string };
+
 const viewTrackers = new Map<string, ViewTracker>();
 
 function splitMessage(text: string, maxLen: number): string[] {
@@ -68,6 +70,10 @@ function splitMessage(text: string, maxLen: number): string[] {
   return chunks;
 }
 
+// ─────────────────────────────────────────────────
+// 閲覧数リアルタイム更新（5秒ごと）
+// ─────────────────────────────────────────────────
+
 async function refreshViewCounts(): Promise<void> {
   for (const [msgId, tracker] of viewTrackers) {
     try {
@@ -77,6 +83,7 @@ async function refreshViewCounts(): Promise<void> {
 
       const detail = await fetchScriptDetail(tracker.slug);
       const freshViews = typeof detail.views === "number" ? detail.views : null;
+      if (freshViews === null) continue;
 
       if (tracker.type === "search") {
         const session = searchSessions.get(msgId);
@@ -84,8 +91,7 @@ async function refreshViewCounts(): Promise<void> {
 
         const s = session.filtered[session.index];
         if (!s || s.slug !== tracker.slug) continue;
-
-        if (freshViews !== null) s.views = freshViews;
+        s.views = freshViews;
 
         const msg = await ch.messages.fetch(msgId).catch(() => null);
         if (!msg) { viewTrackers.delete(msgId); continue; }
@@ -94,20 +100,76 @@ async function refreshViewCounts(): Promise<void> {
         await msg.edit({ embeds: [embed], components: msg.components });
 
       } else {
-        const s = tracker.script;
-        if (freshViews !== null) s.views = freshViews;
-
+        // notify — embedの「閲覧数」フィールドだけ書き換えて再送
         const msg = await ch.messages.fetch(msgId).catch(() => null);
-        if (!msg) { viewTrackers.delete(msgId); continue; }
+        if (!msg) {
+          // メッセージが削除されていたらトラッカーを解除
+          viewTrackers.delete(msgId);
+          continue;
+        }
 
-        const embed = await buildNotifyEmbed(s);
-        await msg.edit({ embeds: [embed] });
+        const existing = msg.embeds[0];
+        if (!existing) continue;
+
+        const updatedFields = existing.fields.map(f =>
+          f.name === "閲覧数"
+            ? { name: f.name, value: freshViews.toLocaleString(), inline: f.inline ?? true }
+            : { name: f.name, value: f.value, inline: f.inline ?? true },
+        );
+
+        const updated = EmbedBuilder.from(existing).setFields(updatedFields);
+        await msg.edit({ embeds: [updated] });
       }
     } catch {
-      // silent
+      // サイレントに無視
     }
   }
 }
+
+// ─────────────────────────────────────────────────
+// Bot起動時：過去の通知メッセージを全スキャンして登録
+// ─────────────────────────────────────────────────
+
+async function loadHistoricalNotifications(): Promise<void> {
+  const guild = client.guilds.cache.get(ALLOWED_GUILD);
+  const ch = guild?.channels.cache.get(NOTIFY_CHANNEL) as TextChannel | undefined;
+  if (!ch) return;
+
+  let before: string | undefined;
+  let loaded = 0;
+
+  // Discord APIは1回100件まで — 最大5回 = 500件スキャン
+  for (let page = 0; page < 5; page++) {
+    const messages = await ch.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    if (messages.size === 0) break;
+
+    for (const [msgId, msg] of messages) {
+      // Botが送ったメッセージで、embedのURLがscriptblox.comのものを対象にする
+      if (msg.author.id !== client.user!.id) continue;
+      const embed = msg.embeds[0];
+      if (!embed?.url) continue;
+
+      const match = embed.url.match(/scriptblox\.com\/script\/([^/?#]+)/);
+      if (!match) continue;
+
+      const slug = match[1];
+
+      if (!viewTrackers.has(msgId)) {
+        viewTrackers.set(msgId, { type: "notify", slug, channelId: NOTIFY_CHANNEL });
+        loaded++;
+      }
+    }
+
+    before = messages.last()?.id;
+    if (messages.size < 100) break;
+  }
+
+  logger.info({ loaded }, "Historical notifications loaded for view tracking");
+}
+
+// ─────────────────────────────────────────────────
+// 新着スクリプト通知 embed 生成
+// ─────────────────────────────────────────────────
 
 async function buildNotifyEmbed(s: import("./scriptblox.js").ScriptResult): Promise<EmbedBuilder> {
   const descRaw = s.features || "";
@@ -141,6 +203,10 @@ async function buildNotifyEmbed(s: import("./scriptblox.js").ScriptResult): Prom
   return embed;
 }
 
+// ─────────────────────────────────────────────────
+// 新着スクリプトポーリング（2分おき）
+// ─────────────────────────────────────────────────
+
 async function pollNewScripts(): Promise<void> {
   try {
     const scripts = await fetchLatestScripts(1);
@@ -164,13 +230,17 @@ async function pollNewScripts(): Promise<void> {
       const sent = await ch.send({ content: "@everyone 新しいスクリプトが投稿されました！", embeds: [embed] });
       logger.info({ title: s.title }, "New script notified");
 
-      viewTrackers.set(sent.id, { type: "notify", slug: s.slug, channelId: NOTIFY_CHANNEL, script: s });
-      setTimeout(() => viewTrackers.delete(sent.id), 60 * 60 * 1000);
+      // タイムアウトなし — 無期限でトラッキング（メッセージ削除時に自動解除）
+      viewTrackers.set(sent.id, { type: "notify", slug: s.slug, channelId: NOTIFY_CHANNEL });
     }
   } catch (err) {
     logger.error({ err }, "Poll new scripts error");
   }
 }
+
+// ─────────────────────────────────────────────────
+// Search embed sender
+// ─────────────────────────────────────────────────
 
 async function sendSearchResults(
   channel: TextChannel,
@@ -187,33 +257,23 @@ async function sendSearchResults(
 
   filtered[0] = await enrichScript(filtered[0]);
   const embed = await buildScriptEmbed(filtered[0], 0, filtered.length);
-
   const sent = await channel.send({ embeds: [embed] });
 
-  if (filtered.length > 0) {
-    const session: SearchSession = {
-      allResults: results,
-      filtered,
-      index: 0,
-      query,
-      filters,
-    };
-    searchSessions.set(sent.id, session);
+  const session: SearchSession = { allResults: results, filtered, index: 0, query, filters };
+  searchSessions.set(sent.id, session);
 
-    const components = filtered.length > 1
-      ? [buildNavRow(sent.id, 0, filtered.length), buildFilterRow(sent.id, filters)]
-      : [buildFilterRow(sent.id, filters)];
+  const components = filtered.length > 1
+    ? [buildNavRow(sent.id, 0, filtered.length), buildFilterRow(sent.id, filters)]
+    : [buildFilterRow(sent.id, filters)];
+  await sent.edit({ components });
 
-    await sent.edit({ components });
+  viewTrackers.set(sent.id, { type: "search", slug: filtered[0].slug, channelId: channel.id });
 
-    viewTrackers.set(sent.id, { type: "search", slug: filtered[0].slug, channelId: channel.id });
-
-    setTimeout(() => {
-      searchSessions.delete(sent.id);
-      viewTrackers.delete(sent.id);
-      sent.edit({ components: [] }).catch(() => {});
-    }, 10 * 60 * 1000);
-  }
+  setTimeout(() => {
+    searchSessions.delete(sent.id);
+    viewTrackers.delete(sent.id);
+    sent.edit({ components: [] }).catch(() => {});
+  }, 10 * 60 * 1000);
 
   if (filtered[0].script.length > 1800) {
     await channel.send({
@@ -223,19 +283,19 @@ async function sendSearchResults(
   }
 }
 
+// ─────────────────────────────────────────────────
+// Button handler
+// ─────────────────────────────────────────────────
+
 async function handleButton(btn: ButtonInteraction): Promise<void> {
   const id = btn.customId;
-
   const isNav = id.startsWith("sp_") || id.startsWith("sn_");
   const isFilter = id.startsWith("sf_");
-
   if (!isNav && !isFilter) return;
 
   const isPrev = id.startsWith("sp_");
   const filterKey = isFilter ? id.slice(3, 5) : "";
-  const msgId = isNav
-    ? id.slice(3)
-    : id.slice(5);
+  const msgId = isNav ? id.slice(3) : id.slice(5);
 
   const session = searchSessions.get(msgId);
   if (!session) {
@@ -249,14 +309,8 @@ async function handleButton(btn: ButtonInteraction): Promise<void> {
     session.index = isPrev
       ? Math.max(0, session.index - 1)
       : Math.min(session.filtered.length - 1, session.index + 1);
-
     session.filtered[session.index] = await enrichScript(session.filtered[session.index]);
-
-    viewTrackers.set(msgId, {
-      type: "search",
-      slug: session.filtered[session.index].slug,
-      channelId: btn.channelId,
-    });
+    viewTrackers.set(msgId, { type: "search", slug: session.filtered[session.index].slug, channelId: btn.channelId });
   }
 
   if (isFilter) {
@@ -271,15 +325,12 @@ async function handleButton(btn: ButtonInteraction): Promise<void> {
     } else if (filterKey === "h_") {
       session.filters.hub = !session.filters.hub;
     }
-
     session.filtered = applyFilters(session.allResults, session.filters);
     session.index = 0;
-
     if (session.filtered.length === 0) {
       await btn.editReply({ content: "フィルター条件に一致するスクリプトが見つかりませんでした。", embeds: [], components: [] });
       return;
     }
-
     session.filtered[0] = await enrichScript(session.filtered[0]);
     viewTrackers.set(msgId, { type: "search", slug: session.filtered[0].slug, channelId: btn.channelId });
   }
@@ -289,15 +340,25 @@ async function handleButton(btn: ButtonInteraction): Promise<void> {
   const components = session.filtered.length > 1
     ? [buildNavRow(msgId, session.index, session.filtered.length), buildFilterRow(msgId, session.filters)]
     : [buildFilterRow(msgId, session.filters)];
-
   await btn.editReply({ embeds: [embed], components });
 }
+
+// ─────────────────────────────────────────────────
+// Events
+// ─────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async (c) => {
   logger.info({ tag: c.user.tag }, "Discord bot ready");
   await registerSlashCommands(c.user.id);
+
+  // 過去の通知メッセージをトラッキング登録（起動時1回）
+  await loadHistoricalNotifications();
+
+  // 新着チェック開始
   pollNewScripts();
   setInterval(pollNewScripts, POLL_INTERVAL_MS);
+
+  // 閲覧数リアルタイム更新（5秒ごと）
   setInterval(refreshViewCounts, VIEW_UPDATE_MS);
 });
 
@@ -397,6 +458,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
     return;
   }
 });
+
+// ─────────────────────────────────────────────────
+// Start
+// ─────────────────────────────────────────────────
 
 export function startBot(): void {
   const token = process.env["DISCORD_BOT_TOKEN"];
