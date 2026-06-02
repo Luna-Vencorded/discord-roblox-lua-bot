@@ -28,7 +28,7 @@ const AI_CHANNEL = "1511176152964923493";
 export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName("search")
-    .setDescription("Roblox Luaスクリプトを検索します")
+    .setDescription("Roblox Luauスクリプトを検索します")
     .addStringOption(o => o.setName("query").setDescription("スクリプト名").setRequired(true))
     .addBooleanOption(o => o.setName("verified").setDescription("認証済みのみ"))
     .addBooleanOption(o => o.setName("key").setDescription("Keyシステムのみ"))
@@ -46,28 +46,32 @@ export const commandDefinitions = [
 
   new SlashCommandBuilder()
     .setName("aichat")
-    .setDescription(`AIにRoblox Luaの質問をします (AIチャンネルのみ)`)
+    .setDescription(`AIにRoblox Luauの質問をします (AIチャンネルのみ)`)
     .addStringOption(o => o.setName("question").setDescription("質問内容").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("obfuscate")
-    .setDescription("Lua/Luauコードを難読化します")
-    .addStringOption(o => o.setName("code").setDescription("難読化するLuaコード").setRequired(true)),
+    .setDescription("Luauコードを難読化します（ファイル or テキスト）")
+    .addAttachmentOption(o => o.setName("file").setDescription(".lua / .txt ファイル"))
+    .addStringOption(o => o.setName("code").setDescription("直接貼り付けるLuauコード")),
 
   new SlashCommandBuilder()
     .setName("deobfuscate")
-    .setDescription("難読化されたLuaコードを解読します")
-    .addStringOption(o => o.setName("code").setDescription("解読するLuaコード").setRequired(true)),
+    .setDescription("難読化されたLuauコードを解読します（ファイル or テキスト）")
+    .addAttachmentOption(o => o.setName("file").setDescription(".lua / .txt ファイル"))
+    .addStringOption(o => o.setName("code").setDescription("直接貼り付けるLuauコード")),
 
   new SlashCommandBuilder()
     .setName("explain")
-    .setDescription("Luaスクリプトの機能を日本語で解説します")
-    .addStringOption(o => o.setName("code").setDescription("解説するLuaコード").setRequired(true)),
+    .setDescription("Luauスクリプトの機能を日本語で解説します（ファイル or テキスト）")
+    .addAttachmentOption(o => o.setName("file").setDescription(".lua / .txt ファイル"))
+    .addStringOption(o => o.setName("code").setDescription("直接貼り付けるLuauコード")),
 
   new SlashCommandBuilder()
     .setName("fix")
-    .setDescription("Luaスクリプトのバグを修正します")
-    .addStringOption(o => o.setName("code").setDescription("修正するLuaコード").setRequired(true)),
+    .setDescription("Luauスクリプトのバグを修正します（ファイル or テキスト）")
+    .addAttachmentOption(o => o.setName("file").setDescription(".lua / .txt ファイル"))
+    .addStringOption(o => o.setName("code").setDescription("直接貼り付けるLuauコード")),
 
   new SlashCommandBuilder()
     .setName("aiset")
@@ -149,6 +153,32 @@ function makeSession(
   return { allResults: all, filtered, index: 0, query, filters };
 }
 
+// ファイル添付またはテキストからコードを取得する
+async function resolveCode(interaction: ChatInputCommandInteraction): Promise<string | null> {
+  const attachment = interaction.options.getAttachment("file");
+  if (attachment) {
+    // MIMEタイプまたは拡張子チェック
+    const name = attachment.name?.toLowerCase() ?? "";
+    if (!name.endsWith(".lua") && !name.endsWith(".txt") && !attachment.contentType?.startsWith("text/")) {
+      await interaction.editReply({ content: "`.lua` または `.txt` ファイルを添付してください。" });
+      return null;
+    }
+    if (attachment.size > 200_000) {
+      await interaction.editReply({ content: "ファイルサイズが大きすぎます（上限200KB）。" });
+      return null;
+    }
+    const res = await fetch(attachment.url);
+    return await res.text();
+  }
+
+  const code = interaction.options.getString("code");
+  if (!code) {
+    await interaction.editReply({ content: "ファイルを添付するか、`code` にコードを入力してください。" });
+    return null;
+  }
+  return code;
+}
+
 export async function handleSlashCommand(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
@@ -222,16 +252,19 @@ export async function handleSlashCommand(
   }
 
   if (["obfuscate", "deobfuscate", "explain", "fix"].includes(commandName)) {
-    const code = interaction.options.getString("code", true);
     await interaction.deferReply();
+
+    const code = await resolveCode(interaction);
+    if (code === null) return;
+
     let result: string;
     let title: string;
     let color: number;
     switch (commandName) {
-      case "obfuscate":   result = await obfuscateLua(code);   title = "難読化結果";       color = Colors.Orange;  break;
-      case "deobfuscate": result = await deobfuscateLua(code); title = "解読結果";         color = Colors.Purple;  break;
-      case "explain":     result = await explainLua(code);     title = "スクリプト解説";   color = Colors.Blurple; break;
-      default:            result = await fixLua(code);         title = "バグ修正結果";     color = Colors.Green;   break;
+      case "obfuscate":   result = await obfuscateLua(code);   title = "難読化結果（Luau）";   color = Colors.Orange;  break;
+      case "deobfuscate": result = await deobfuscateLua(code); title = "解読結果（Luau）";     color = Colors.Purple;  break;
+      case "explain":     result = await explainLua(code);     title = "スクリプト解説（Luau）"; color = Colors.Blurple; break;
+      default:            result = await fixLua(code);         title = "バグ修正結果（Luau）"; color = Colors.Green;   break;
     }
     await sendLongReply(interaction, title, result, color);
     return;
