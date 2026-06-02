@@ -103,8 +103,8 @@ async function callAI(
 }
 
 // ─── 会話履歴付きチャット ────────────────────────────────────────────────────
-const CHAT_SYSTEM = `あなたはRoblox Luaスクリプトの専門AIアシスタントです。
-- Roblox Luaスクリプトの説明・解説
+const CHAT_SYSTEM = `あなたはRoblox Luauスクリプトの専門AIアシスタントです。
+- Roblox Luauスクリプトの説明・解説
 - スクリプトの難読化（obfuscation）
 - 難読化されたスクリプトのリバースエンジニアリング（解読）
 - スクリプトのバグ修正・改善提案
@@ -149,7 +149,7 @@ export async function getAIResponse(
 
 export async function obfuscateLua(code: string): Promise<string> {
   return callAI(
-    "あなたはRoblox Luaスクリプトの難読化専門家です。与えられたLuaコードを難読化してください。変数名をランダムな文字列に変換し、文字列をエンコードし、制御フローを複雑にしてください。難読化されたコードのみを出力してください。説明は不要です。",
+    "あなたはRoblox Luauスクリプトの難読化専門家です。与えられたLuauコードを難読化してください。変数名をランダムな文字列に変換し、文字列をエンコードし、制御フローを複雑にしてください。難読化されたコードのみを出力してください。説明は不要です。",
     code,
     4096,
   );
@@ -157,7 +157,7 @@ export async function obfuscateLua(code: string): Promise<string> {
 
 export async function deobfuscateLua(code: string): Promise<string> {
   return callAI(
-    "あなたはRoblox Luaスクリプトのリバースエンジニアリング専門家です。与えられた難読化されたLuaコードを読みやすい形式に変換してください。変数名を意味のある名前に変換し、コードの構造を明確にしてください。解読されたコードと簡単な説明を日本語で出力してください。",
+    "あなたはRoblox Luauスクリプトのリバースエンジニアリング専門家です。与えられた難読化されたLuauコードを読みやすい形式に変換してください。変数名を意味のある名前に変換し、コードの構造を明確にしてください。解読されたコードと簡単な説明を日本語で出力してください。",
     code,
     4096,
   );
@@ -165,7 +165,7 @@ export async function deobfuscateLua(code: string): Promise<string> {
 
 export async function explainLua(code: string): Promise<string> {
   return callAI(
-    "あなたはRoblox Luaスクリプトの解説専門家です。与えられたLuaスクリプトの機能・仕組みを日本語でわかりやすく解説してください。主要な機能、使用しているRoblox API、潜在的なリスクがあれば指摘してください。",
+    "あなたはRoblox Luauスクリプトの解説専門家です。与えられたLuauスクリプトの機能・仕組みを日本語でわかりやすく解説してください。主要な機能、使用しているRoblox API、潜在的なリスクがあれば指摘してください。",
     code,
     2048,
   );
@@ -173,7 +173,7 @@ export async function explainLua(code: string): Promise<string> {
 
 export async function fixLua(code: string): Promise<string> {
   return callAI(
-    "あなたはRoblox Luaスクリプトのデバッグ専門家です。与えられたLuaコードのバグを特定し修正してください。修正後のコードと変更点の説明を日本語で出力してください。",
+    "あなたはRoblox Luauスクリプトのデバッグ専門家です。与えられたLuauコードのバグを特定し修正してください。修正後のコードと変更点の説明を日本語で出力してください。",
     code,
     4096,
   );
