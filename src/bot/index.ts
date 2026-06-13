@@ -3,10 +3,8 @@ import {
   GatewayIntentBits,
   EmbedBuilder,
   Events,
-  Message,
   TextChannel,
   Colors,
-  BaseGuildTextChannel,
   ButtonInteraction,
   ChatInputCommandInteraction,
   MessageFlags,
@@ -24,6 +22,8 @@ import {
   getAiChannelId,
   setAiChannelId,
   isValidUrl,
+  getNotifyChannelId,
+  isNotifyEnabled,
   type SearchSession,
 } from "./searchUtils.js";
 import { searchScript } from "./scriptblox.js";
@@ -35,7 +35,7 @@ const ALLOWED_CHANNEL = "1510354846111371377";
 const AI_CHANNEL = "1511176152964923493";
 const NOTIFY_CHANNEL = "1511170667414818857";
 
-const POLL_INTERVAL_MS = 2 * 60 * 1000;
+const POLL_INTERVAL_MS = 30 * 1000;
 const VIEW_UPDATE_MS   = 5 * 1000;
 
 export const client = new Client({
@@ -204,10 +204,11 @@ async function buildNotifyEmbed(s: import("./scriptblox.js").ScriptResult): Prom
 }
 
 // ─────────────────────────────────────────────────
-// 新着スクリプトポーリング（2分おき）
+// 新着スクリプトポーリング（30秒おき — リアルタイム）
 // ─────────────────────────────────────────────────
 
 async function pollNewScripts(): Promise<void> {
+  if (!isNotifyEnabled()) return;
   try {
     const scripts = await fetchLatestScripts(1);
     if (!notifyInitialized) {
@@ -220,18 +221,19 @@ async function pollNewScripts(): Promise<void> {
     for (const s of newScripts) seenScriptIds.add(s.scriptId);
     if (newScripts.length === 0) return;
 
+    const notifyChannelId = getNotifyChannelId() ?? NOTIFY_CHANNEL;
     const guild = client.guilds.cache.get(ALLOWED_GUILD);
-    const ch = guild?.channels.cache.get(NOTIFY_CHANNEL) as TextChannel | undefined;
+    const ch = guild?.channels.cache.get(notifyChannelId) as TextChannel | undefined;
     if (!ch) return;
 
     for (const raw of newScripts) {
       const s = await enrichScript(raw);
       const embed = await buildNotifyEmbed(s);
-      const sent = await ch.send({ content: "<@$1515392644417585233> 新しいスクリプトが投稿されました！", embeds: [embed] });
+      const sent = await ch.send({ content: "<@1515392644417585233> 新しいスクリプトが投稿されました！", embeds: [embed] });
       logger.info({ title: s.title }, "New script notified");
 
       // タイムアウトなし — 無期限でトラッキング（メッセージ削除時に自動解除）
-      viewTrackers.set(sent.id, { type: "notify", slug: s.slug, channelId: NOTIFY_CHANNEL });
+      viewTrackers.set(sent.id, { type: "notify", slug: s.slug, channelId: notifyChannelId });
     }
   } catch (err) {
     logger.error({ err }, "Poll new scripts error");
@@ -354,7 +356,7 @@ client.once(Events.ClientReady, async (c) => {
   // 過去の通知メッセージをトラッキング登録（起動時1回）
   await loadHistoricalNotifications();
 
-  // 新着チェック開始
+  // 新着チェック開始（30秒おき — リアルタイム）
   pollNewScripts();
   setInterval(pollNewScripts, POLL_INTERVAL_MS);
 
@@ -376,87 +378,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-client.on(Events.MessageCreate, async (message: Message) => {
+client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (message.guildId !== ALLOWED_GUILD) return;
-
-  const content = message.content.trim();
-  const inSearch = message.channelId === ALLOWED_CHANNEL;
-  const inAI = message.channelId === AI_CHANNEL;
-
-  if (inSearch && content === "!set") {
-    setAiChannelId(message.channelId);
-    conversationHistory.clear();
-    await message.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(Colors.Green)
-          .setTitle("AI自動応答 有効")
-          .setDescription(`<#${message.channelId}> でAI自動応答を開始しました。\n停止するには \`!unset\` を送信してください。`)
-          .setTimestamp(),
-      ],
-    });
-    return;
-  }
-  if (content === "!unset") {
-    setAiChannelId(null);
-    conversationHistory.clear();
-    await message.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(Colors.Red)
-          .setTitle("AI自動応答 無効")
-          .setDescription("AI自動応答を停止しました。")
-          .setTimestamp(),
-      ],
-    });
-    return;
-  }
-
-  if (inSearch && content.startsWith("!search_")) {
-    const query = content.slice("!search_".length).trim();
-    if (!query) {
-      await message.reply("スクリプト名を指定してください。例: `!search_infinite jump`");
-      return;
-    }
-    try {
-      await (message.channel as BaseGuildTextChannel).sendTyping();
-      const results = await searchScript(query, 20);
-      if (results.length === 0) {
-        await message.reply(`"${query}" に関するスクリプトが見つかりませんでした。`);
-        return;
-      }
-      const noFilter = { verified: false, keySystem: false, universal: false, hub: false };
-      await sendSearchResults(message.channel as TextChannel, results, query, noFilter);
-    } catch (err) {
-      logger.error({ err }, "Script search error");
-      await message.reply("スクリプトの検索中にエラーが発生しました。");
-    }
-    return;
-  }
-
-  if (inAI) {
-    const aiChId = getAiChannelId();
-    if (aiChId !== AI_CHANNEL && aiChId !== message.channelId) return;
-
-    const userId = message.author.id;
-    const history = conversationHistory.get(userId) ?? [];
-    try {
-      await (message.channel as BaseGuildTextChannel).sendTyping();
-      const reply = await getAIResponse(content, history);
-      history.push({ role: "user", content });
-      history.push({ role: "assistant", content: reply });
-      if (history.length > 20) history.splice(0, 2);
-      conversationHistory.set(userId, history);
-      for (const chunk of splitMessage(reply, 1990)) {
-        await message.reply(chunk);
-      }
-    } catch (err) {
-      logger.error({ err }, "AI response error");
-      await message.reply("AI応答中にエラーが発生しました。");
-    }
-    return;
-  }
+  // すべての操作は /コマンドで行ってください
 });
 
 // ─────────────────────────────────────────────────
