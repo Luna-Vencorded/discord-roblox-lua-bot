@@ -227,7 +227,7 @@ async function pollNewScripts(): Promise<void> {
     for (const raw of newScripts) {
       const s = await enrichScript(raw);
       const embed = await buildNotifyEmbed(s);
-      const sent = await ch.send({ content: "@everyone 新しいスクリプトが投稿されました！", embeds: [embed] });
+      const sent = await ch.send({ content: "<@$1515392644417585233> 新しいスクリプトが投稿されました！", embeds: [embed] });
       logger.info({ title: s.title }, "New script notified");
 
       // タイムアウトなし — 無期限でトラッキング（メッセージ削除時に自動解除）
