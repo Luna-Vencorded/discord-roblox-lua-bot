@@ -48,7 +48,8 @@ export const client = new Client({
 
 const conversationHistory = new Map<string, { role: "user" | "assistant"; content: string }[]>();
 
-const seenScriptIds = new Set<string>();
+// createdAt タイムスタンプで新着を判定（IDではなく日時ベース）
+let latestSeenCreatedAt: Date = new Date(0);
 let notifyInitialized = false;
 
 // script オブジェクトは不要 — slug だけあれば閲覧数をAPIから取得できる
@@ -103,7 +104,6 @@ async function refreshViewCounts(): Promise<void> {
         // notify — embedの「閲覧数」フィールドだけ書き換えて再送
         const msg = await ch.messages.fetch(msgId).catch(() => null);
         if (!msg) {
-          // メッセージが削除されていたらトラッカーを解除
           viewTrackers.delete(msgId);
           continue;
         }
@@ -144,7 +144,6 @@ async function loadHistoricalNotifications(): Promise<void> {
     if (messages.size === 0) break;
 
     for (const [msgId, msg] of messages) {
-      // Botが送ったメッセージで、embedのURLがscriptblox.comのものを対象にする
       if (msg.author.id !== client.user!.id) continue;
       const embed = msg.embeds[0];
       if (!embed?.url) continue;
@@ -205,34 +204,65 @@ async function buildNotifyEmbed(s: import("./scriptblox.js").ScriptResult): Prom
 
 // ─────────────────────────────────────────────────
 // 新着スクリプトポーリング（30秒おき — リアルタイム）
+// createdAt タイムスタンプ基準で判定（lastBump でソートされるAPIに対応）
 // ─────────────────────────────────────────────────
 
 async function pollNewScripts(): Promise<void> {
   if (!isNotifyEnabled()) return;
   try {
-    const scripts = await fetchLatestScripts(1);
+    // max=50 で取得。APIは lastBump でソートされるため、新着が上位に来ない場合も多い
+    const scripts = await fetchLatestScripts(1, 50);
+    if (scripts.length === 0) return;
+
     if (!notifyInitialized) {
-      for (const s of scripts) seenScriptIds.add(s.scriptId);
+      // 初回: 現在の最新 createdAt をベースラインとして記録
+      const times = scripts
+        .map(s => new Date(s.createdAt || 0).getTime())
+        .filter(t => !isNaN(t) && t > 0);
+      if (times.length > 0) {
+        latestSeenCreatedAt = new Date(Math.max(...times));
+      }
       notifyInitialized = true;
-      logger.info({ count: seenScriptIds.size }, "New script watcher initialized");
+      logger.info(
+        { baseline: latestSeenCreatedAt.toISOString(), total: scripts.length },
+        "New script watcher initialized (createdAt-based)",
+      );
       return;
     }
-    const newScripts = scripts.filter(s => s.scriptId && !seenScriptIds.has(s.scriptId));
-    for (const s of newScripts) seenScriptIds.add(s.scriptId);
+
+    // createdAt がベースラインより新しいスクリプトのみ通知対象
+    const newScripts = scripts.filter(s => {
+      const t = new Date(s.createdAt || 0).getTime();
+      return !isNaN(t) && t > latestSeenCreatedAt.getTime();
+    });
+
     if (newScripts.length === 0) return;
+
+    // ベースラインを更新（最も新しい createdAt）
+    const maxTime = Math.max(...newScripts.map(s => new Date(s.createdAt || 0).getTime()));
+    latestSeenCreatedAt = new Date(maxTime);
+
+    // 古い順に並べて通知（投稿順に流す）
+    newScripts.sort(
+      (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime(),
+    );
 
     const notifyChannelId = getNotifyChannelId() ?? NOTIFY_CHANNEL;
     const guild = client.guilds.cache.get(ALLOWED_GUILD);
     const ch = guild?.channels.cache.get(notifyChannelId) as TextChannel | undefined;
-    if (!ch) return;
+    if (!ch) {
+      logger.warn({ notifyChannelId }, "Notify channel not found in guild cache");
+      return;
+    }
 
     for (const raw of newScripts) {
       const s = await enrichScript(raw);
       const embed = await buildNotifyEmbed(s);
-      const sent = await ch.send({ content: "<@1515392644417585233> 新しいスクリプトが投稿されました！", embeds: [embed] });
-      logger.info({ title: s.title }, "New script notified");
-
-      // タイムアウトなし — 無期限でトラッキング（メッセージ削除時に自動解除）
+      const sent = await ch.send({
+        content: "<@1515392644417585233> 新しいスクリプトが投稿されました！",
+        embeds: [embed],
+      });
+      logger.info({ title: s.title, createdAt: s.createdAt }, "New script notified");
       viewTrackers.set(sent.id, { type: "notify", slug: s.slug, channelId: notifyChannelId });
     }
   } catch (err) {
