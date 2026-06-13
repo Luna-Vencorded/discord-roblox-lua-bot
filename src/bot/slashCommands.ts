@@ -25,11 +25,11 @@ const ALLOWED_GUILDS = [
   "1490495338296115364",
   "1476104535683371202"
 ];
-const ALLOWED_CHANNEL = [
+const ALLOWED_CHANNELS = [
   "1510354846111371377",
   "1515385929584480316"
 ];
-const AI_CHANNEL = [
+const AI_CHANNELS = [
   "1511176152964923493",
   "1515385854686789682"                 
 ];
@@ -107,9 +107,11 @@ export async function registerSlashCommands(clientId: string): Promise<void> {
   const rest = new REST({ version: "10" }).setToken(token);
 
   try {
-    await rest.put(Routes.applicationGuildCommands(clientId, ALLOWED_GUILD), {
-      body: commandDefinitions,
-    });
+    for (const guild of ALLOWED_GUILDS) {
+      await rest.put(Routes.applicationGuildCommands(clientId, guild), {
+        body: commandDefinitions,
+      });
+    }
     logger.info("Slash commands registered (guild)");
     return;
   } catch (err) {
@@ -207,8 +209,8 @@ export async function handleSlashCommand(
           .setColor(Colors.Green)
           .setTitle("Bot ステータス")
           .addFields(
-            { name: "検索チャンネル", value: `<#${ALLOWED_CHANNEL}>`, inline: true },
-            { name: "AIチャンネル", value: `<#${AI_CHANNEL}>`, inline: true },
+            { name: "検索チャンネル", value: ALLOWED_CHANNELS.map(id => `<#${id}>`).join(", "), inline: true },
+            { name: "AIチャンネル", value: AI_CHANNELS.map(id => `<#${id}>`).join(", "), inline: true },
             { name: "通知チャンネル", value: "<#1511170667414818857>", inline: true },
           )
           .setTimestamp(),
@@ -252,7 +254,7 @@ export async function handleSlashCommand(
 
   if (commandName === "aichat") {
     if (!inAI) {
-      await interaction.reply({ content: `AIコマンドは <#${AI_CHANNEL}> でのみ使用できます。`, flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: `AIコマンドは ${AI_CHANNELS.map(id => `<#${id}>`).join(", ")} でのみ使用できます。`, flags: MessageFlags.Ephemeral });
       return;
     }
     const question = interaction.options.getString("question", true);
@@ -285,7 +287,7 @@ export async function handleSlashCommand(
 
   if (!inAllowed) {
     await interaction.reply({
-      content: `検索コマンドは <#${ALLOWED_CHANNEL}> でのみ使用できます。`,
+      content: `検索コマンドは ${ALLOWED_CHANNELS.map(id => `<#${id}>`).join(", ")} でのみ使用できます。`,
       flags: MessageFlags.Ephemeral,
     });
     return;
