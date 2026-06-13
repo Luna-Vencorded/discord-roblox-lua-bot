@@ -18,6 +18,9 @@ import {
   applyFilters,
   searchSessions,
   setAiChannelId,
+  setNotifyChannelId,
+  setNotifyEnabled,
+  isNotifyEnabled,
   type SearchSession,
 } from "./searchUtils.js";
 
@@ -31,7 +34,7 @@ const ALLOWED_CHANNEL = [
 ];
 const AI_CHANNEL = [
   "1511176152964923493",
-  "1515385854686789682"                 
+  "1515385854686789682"
 ];
 
 export const commandDefinitions = [
@@ -55,7 +58,7 @@ export const commandDefinitions = [
 
   new SlashCommandBuilder()
     .setName("aichat")
-    .setDescription(`AIにRoblox Luauの質問をします (AIチャンネルのみ)`)
+    .setDescription("AIにRoblox Luauの質問をします (AIチャンネルのみ)")
     .addStringOption(o => o.setName("question").setDescription("質問内容").setRequired(true)),
 
   new SlashCommandBuilder()
@@ -91,6 +94,14 @@ export const commandDefinitions = [
     .setDescription("AI自動応答を停止します"),
 
   new SlashCommandBuilder()
+    .setName("notifyon")
+    .setDescription("このチャンネルでスクリプト新着通知を開始します（解除まで30秒おきにリアルタイム通知）"),
+
+  new SlashCommandBuilder()
+    .setName("notifyoff")
+    .setDescription("スクリプト新着通知を停止します"),
+
+  new SlashCommandBuilder()
     .setName("keyinfo")
     .setDescription("スクリプトのKeyシステム情報を確認します")
     .addStringOption(o => o.setName("slug").setDescription("スクリプトのslug（URLの末尾部分）").setRequired(true)),
@@ -106,21 +117,24 @@ export async function registerSlashCommands(clientId: string): Promise<void> {
 
   const rest = new REST({ version: "10" }).setToken(token);
 
-  try {
-    await rest.put(Routes.applicationGuildCommands(clientId, ALLOWED_GUILD), {
-      body: commandDefinitions,
-    });
-    logger.info("Slash commands registered (guild)");
-    return;
-  } catch (err) {
-    logger.warn({ err }, "Guild slash commands failed, trying global...");
+  // 全許可サーバーにコマンドを登録
+  for (const guildId of ALLOWED_GUILDS) {
+    try {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+        body: commandDefinitions,
+      });
+      logger.info({ guildId }, "Slash commands registered (guild)");
+    } catch (err) {
+      logger.warn({ err, guildId }, "Guild slash commands failed for guild");
+    }
   }
 
+  // グローバル登録をフォールバックとして試みる
   try {
     await rest.put(Routes.applicationCommands(clientId), { body: commandDefinitions });
     logger.info("Slash commands registered (global — may take up to 1 hour)");
   } catch (err) {
-    logger.error({ err }, "Slash command registration failed entirely");
+    logger.error({ err }, "Slash command global registration failed");
     logger.info(
       `Re-invite URL with correct scope: https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=8&scope=bot%20applications.commands`,
     );
@@ -166,7 +180,6 @@ function makeSession(
 async function resolveCode(interaction: ChatInputCommandInteraction): Promise<string | null> {
   const attachment = interaction.options.getAttachment("file");
   if (attachment) {
-    // MIMEタイプまたは拡張子チェック
     const name = attachment.name?.toLowerCase() ?? "";
     if (!name.endsWith(".lua") && !name.endsWith(".txt") && !attachment.contentType?.startsWith("text/")) {
       await interaction.editReply({ content: "`.lua` または `.txt` ファイルを添付してください。" });
@@ -195,10 +208,10 @@ export async function handleSlashCommand(
   const inGuild = guildId ? ALLOWED_GUILDS.includes(guildId) : false;
   const inAllowed =
     inGuild &&
-    ALLOWED_CHANNELS.includes(channelId);
+    ALLOWED_CHANNEL.includes(channelId);
   const inAI =
     inGuild &&
-    AI_CHANNELS.includes(channelId);
+    AI_CHANNEL.includes(channelId);
 
   if (commandName === "status") {
     await interaction.reply({
@@ -207,9 +220,9 @@ export async function handleSlashCommand(
           .setColor(Colors.Green)
           .setTitle("Bot ステータス")
           .addFields(
-            { name: "検索チャンネル", value: `<#${ALLOWED_CHANNEL}>`, inline: true },
-            { name: "AIチャンネル", value: `<#${AI_CHANNEL}>`, inline: true },
-            { name: "通知チャンネル", value: "<#1511170667414818857>", inline: true },
+            { name: "検索チャンネル", value: ALLOWED_CHANNEL.map(id => `<#${id}>`).join(", "), inline: true },
+            { name: "AIチャンネル", value: AI_CHANNEL.map(id => `<#${id}>`).join(", "), inline: true },
+            { name: "通知", value: isNotifyEnabled() ? "✓ 有効" : "✗ 停止中", inline: true },
           )
           .setTimestamp(),
       ],
@@ -250,9 +263,43 @@ export async function handleSlashCommand(
     return;
   }
 
+  // ─── 通知コマンド ──────────────────────────────────────────────────────────
+  if (commandName === "notifyon") {
+    setNotifyChannelId(channelId);
+    setNotifyEnabled(true);
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(Colors.Gold)
+          .setTitle("🔔 スクリプト通知 開始")
+          .setDescription(
+            `<#${channelId}> でスクリプト新着通知を開始しました。\n` +
+            `30秒おきにScriptBloxをチェックし、新しいスクリプトをリアルタイムで通知します。\n\n` +
+            `停止するには \`/notifyoff\` を実行してください。`,
+          )
+          .setTimestamp(),
+      ],
+    });
+    return;
+  }
+  if (commandName === "notifyoff") {
+    setNotifyEnabled(false);
+    setNotifyChannelId(null);
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(Colors.Red)
+          .setTitle("🔕 スクリプト通知 停止")
+          .setDescription("スクリプト新着通知を停止しました。\n再開するには `/notifyon` を実行してください。")
+          .setTimestamp(),
+      ],
+    });
+    return;
+  }
+
   if (commandName === "aichat") {
     if (!inAI) {
-      await interaction.reply({ content: `AIコマンドは <#${AI_CHANNEL}> でのみ使用できます。`, flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: `AIコマンドは ${AI_CHANNEL.map(id => `<#${id}>`).join(" か ")} でのみ使用できます。`, flags: MessageFlags.Ephemeral });
       return;
     }
     const question = interaction.options.getString("question", true);
@@ -274,10 +321,10 @@ export async function handleSlashCommand(
     let title: string;
     let color: number;
     switch (commandName) {
-      case "obfuscate":   result = await obfuscateLua(code);   title = "難読化結果（Luau）";   color = Colors.Orange;  break;
-      case "deobfuscate": result = await deobfuscateLua(code); title = "解読結果（Luau）";     color = Colors.Purple;  break;
+      case "obfuscate":   result = await obfuscateLua(code);   title = "難読化結果（Luau）";     color = Colors.Orange;  break;
+      case "deobfuscate": result = await deobfuscateLua(code); title = "解読結果（Luau）";       color = Colors.Purple;  break;
       case "explain":     result = await explainLua(code);     title = "スクリプト解説（Luau）"; color = Colors.Blurple; break;
-      default:            result = await fixLua(code);         title = "バグ修正結果（Luau）"; color = Colors.Green;   break;
+      default:            result = await fixLua(code);         title = "バグ修正結果（Luau）";   color = Colors.Green;   break;
     }
     await sendLongReply(interaction, title, result, color);
     return;
@@ -285,7 +332,7 @@ export async function handleSlashCommand(
 
   if (!inAllowed) {
     await interaction.reply({
-      content: `検索コマンドは <#${ALLOWED_CHANNEL}> でのみ使用できます。`,
+      content: `検索コマンドは ${ALLOWED_CHANNEL.map(id => `<#${id}>`).join(" か ")} でのみ使用できます。`,
       flags: MessageFlags.Ephemeral,
     });
     return;
