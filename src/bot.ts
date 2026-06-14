@@ -25,13 +25,17 @@ import { translateTitle, translateDescription } from "./translate.js";
 import { isPosted, markPosted, getAllPosted, updateViews } from "./store.js";
 
 const GUILD_ID = process.env["GUILD_ID"] ?? "1476104535683371202";
-const CHANNEL_ID = process.env["CHANNEL_ID"] ?? "1515622353114107984";
+const CHANNEL_ID = process.env["CHANNEL_ID"] ?? "1515709262419202118";
 const POST_INTERVAL_MS = Number(process.env["POST_INTERVAL_MS"] ?? "10000");
 const VIEW_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 let client: Client | null = null;
 let isRunning = false;
 let stopRequested = false;
+
+// フォーラムに既に投稿済みのスレッドタイトル（小文字）を保持するSet
+// !goの実行開始時にフォーラムから読み込み、投稿のたびに追加する
+const existingThreadTitles = new Set<string>();
 
 function log(msg: string, data?: unknown) {
   console.log(`[${new Date().toISOString()}] ${msg}`, data ?? "");
@@ -104,6 +108,45 @@ async function ensureForumTags(forumChannel: ForumChannel, tagNames: string[]): 
   return tagIds;
 }
 
+/**
+ * !goの開始時にフォーラムの既存スレッドタイトルをすべて読み込む。
+ * これにより、JSONが消えても既存スレッドと重複投稿しない。
+ */
+async function loadExistingThreadTitles(): Promise<void> {
+  if (!client) return;
+  existingThreadTitles.clear();
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const forumChannel = await getForumChannel(guild);
+
+    // アクティブなスレッドを取得
+    const active = await forumChannel.threads.fetchActive();
+    for (const [, thread] of active.threads) {
+      existingThreadTitles.add(thread.name.toLowerCase().slice(0, 100));
+    }
+
+    // アーカイブ済みスレッドも取得（重複確認のため）
+    let before: string | undefined = undefined;
+    let hasMore = true;
+    while (hasMore) {
+      const archived = await forumChannel.threads.fetchArchived({ limit: 100, before });
+      for (const [, thread] of archived.threads) {
+        existingThreadTitles.add(thread.name.toLowerCase().slice(0, 100));
+      }
+      hasMore = archived.hasMore;
+      if (archived.threads.size > 0) {
+        before = archived.threads.last()?.id;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    log(`既存スレッドタイトル読み込み完了: ${existingThreadTitles.size} 件`);
+  } catch (err) {
+    log("既存スレッドの読み込みに失敗しました", err);
+  }
+}
+
 async function postScript(listScript: ScriptbloxListScript): Promise<void> {
   if (!client) throw new Error("Discord client not ready");
 
@@ -112,6 +155,26 @@ async function postScript(listScript: ScriptbloxListScript): Promise<void> {
   const forumChannel = await getForumChannel(guild);
 
   const translatedTitle = await translateTitle(script.title);
+  const threadName = translatedTitle.slice(0, 100);
+  const threadNameLower = threadName.toLowerCase();
+
+  // タイトルがすでにフォーラムに存在する場合はスキップ（多重投稿防止）
+  if (existingThreadTitles.has(threadNameLower)) {
+    log(`スキップ（タイトル重複）: ${threadName}`, { scriptId: script._id });
+    // JSONにも記録しておき次回以降もスキップできるようにする
+    if (!isPosted(script._id)) {
+      markPosted({
+        scriptId: script._id,
+        slug: script.slug,
+        threadId: "skipped-duplicate-title",
+        postedAt: new Date().toISOString(),
+        views: script.views ?? 0,
+        lastViewUpdate: new Date().toISOString(),
+      });
+    }
+    return;
+  }
+
   const rawDesc = script.features ?? "";
   const translatedDesc = rawDesc ? await translateDescription(rawDesc) : "";
 
@@ -122,7 +185,7 @@ async function postScript(listScript: ScriptbloxListScript): Promise<void> {
   const appliedTagIds = await ensureForumTags(forumChannel, tagNames);
 
   const thread = await forumChannel.threads.create({
-    name: translatedTitle.slice(0, 100),
+    name: threadName,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     appliedTags: appliedTagIds.slice(0, 5),
     message: {
@@ -130,6 +193,9 @@ async function postScript(listScript: ScriptbloxListScript): Promise<void> {
       content: `${bold(translatedTitle)}\n${scriptUrl}`,
     },
   });
+
+  // 投稿したタイトルをSetに追加して以降の重複を防ぐ
+  existingThreadTitles.add(threadNameLower);
 
   markPosted({
     scriptId: script._id,
@@ -151,7 +217,9 @@ async function runPostLoop(statusMsg: Message): Promise<void> {
   let page = 1;
   let totalPosted = 0;
 
-  await statusMsg.reply("スキャン開始。ページごとに取得して順次投稿します。").catch(() => {});
+  await statusMsg.reply("既存スレッドタイトルを読み込み中...").catch(() => {});
+  await loadExistingThreadTitles();
+  await statusMsg.reply(`スキャン開始。既存スレッド ${existingThreadTitles.size} 件を確認済み。ページごとに取得して順次投稿します。`).catch(() => {});
 
   while (!stopRequested) {
     try {
@@ -192,6 +260,8 @@ async function runPostLoop(statusMsg: Message): Promise<void> {
       if (!data.result.nextPage || page >= totalPages) {
         await statusMsg.reply(`全ページスキャン完了（${totalPosted} 件投稿）。5分後に新着確認します。`).catch(() => {});
         await sleep(5 * 60 * 1000);
+        // 新着確認の前に再度既存タイトルを更新
+        await loadExistingThreadTitles();
         page = 1;
         totalPosted = 0;
       } else {
@@ -216,6 +286,9 @@ async function runViewUpdateLoop(): Promise<void> {
     log(`View update: ${posted.length} scripts`);
 
     for (const entry of posted) {
+      // スキップ済みとして記録されたものはビュー更新しない
+      if (entry.threadId === "skipped-duplicate-title") continue;
+
       try {
         const latest = await fetchScriptDetail(entry.scriptId);
         if (latest && client) {
@@ -276,8 +349,101 @@ async function handleDebug(message: Message): Promise<void> {
     lines.push(`エラー: ${err instanceof Error ? err.message : String(err)}`);
   }
   lines.push(`投稿済み: ${getAllPosted().length} 件`);
+  lines.push(`既存タイトル数: ${existingThreadTitles.size} 件`);
   lines.push(`投稿中: ${isRunning ? "YES" : "NO"}`);
   await message.reply(lines.join("\n")).catch(() => {});
+}
+
+/**
+ * !delete コマンドの処理。
+ * フォーラムチャンネル内でタイトルが同じスレッドを検索し、
+ * 一番古いもの（1件）だけ残してほかをすべて削除する。
+ */
+async function handleDelete(message: Message): Promise<void> {
+  if (!client) { await message.reply("クライアント未初期化").catch(() => {}); return; }
+
+  await message.reply("重複スレッドを検索中... しばらくお待ちください。").catch(() => {});
+
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const forumChannel = await getForumChannel(guild);
+
+    // タイトル → スレッド情報のMap（小文字で正規化）
+    const titleMap = new Map<string, { id: string; createdTimestamp: number }[]>();
+
+    const addThread = (id: string, name: string, createdTimestamp: number) => {
+      const key = name.toLowerCase();
+      if (!titleMap.has(key)) titleMap.set(key, []);
+      titleMap.get(key)!.push({ id, createdTimestamp });
+    };
+
+    // アクティブなスレッドを収集
+    const active = await forumChannel.threads.fetchActive();
+    for (const [id, thread] of active.threads) {
+      addThread(id, thread.name, thread.createdTimestamp ?? 0);
+    }
+
+    // アーカイブ済みスレッドも収集
+    let before: string | undefined = undefined;
+    let hasMore = true;
+    while (hasMore) {
+      const archived = await forumChannel.threads.fetchArchived({ limit: 100, before });
+      for (const [id, thread] of archived.threads) {
+        addThread(id, thread.name, thread.createdTimestamp ?? 0);
+      }
+      hasMore = archived.hasMore;
+      if (archived.threads.size > 0) {
+        before = archived.threads.last()?.id;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    // 重複しているものを集計
+    let deletedCount = 0;
+    let errorCount = 0;
+    const duplicateGroups: string[] = [];
+
+    for (const [title, threads] of titleMap) {
+      if (threads.length <= 1) continue;
+
+      // 作成日時が古い順にソートし、最初の1件だけ残す
+      threads.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      const toDelete = threads.slice(1);
+      duplicateGroups.push(`「${title}」: ${threads.length}件 → ${toDelete.length}件削除`);
+
+      for (const t of toDelete) {
+        try {
+          const thread = await forumChannel.threads.fetch(t.id);
+          if (thread) {
+            // アーカイブされていたら先に解除してから削除
+            if (thread.archived) {
+              await thread.setArchived(false).catch(() => {});
+            }
+            await thread.delete();
+            deletedCount++;
+          }
+        } catch (err) {
+          log(`スレッド削除エラー: ${t.id}`, err);
+          errorCount++;
+        }
+        await sleep(1000); // レート制限対策
+      }
+    }
+
+    if (duplicateGroups.length === 0) {
+      await message.reply("重複スレッドは見つかりませんでした。").catch(() => {});
+    } else {
+      const summary = duplicateGroups.join("\n");
+      await message.reply(
+        `削除完了: ${deletedCount} 件削除${errorCount > 0 ? `（${errorCount} 件エラー）` : ""}。\n\n${summary}`
+      ).catch(() => {});
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await message.reply(`エラーが発生しました: ${msg}`).catch(() => {});
+    log("handleDelete error", err);
+  }
 }
 
 export async function startBot(): Promise<void> {
@@ -318,6 +484,8 @@ export async function startBot(): Promise<void> {
     }
 
     if (content === "!debug") await handleDebug(message);
+
+    if (content === "!delete") await handleDelete(message);
   });
 
   client.on("error", (err) => log("Discord client error", err));
