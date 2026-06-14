@@ -7,6 +7,8 @@ import {
   bold,
   hyperlink,
   ChannelType,
+  Partials,
+  PermissionFlagsBits,
   type Message,
   type Guild,
   type GuildBasedChannel,
@@ -22,19 +24,21 @@ import {
   type ScriptbloxListScript,
 } from "./scriptblox.js";
 import { translateTitle, translateDescription } from "./translate.js";
-import { isPosted, markPosted, getAllPosted, updateViews } from "./store.js";
+import { isPosted, markPosted, getAllPosted, updateViews, saveProgress, getProgress, resetProgress } from "./store.js";
 
 const GUILD_ID = process.env["GUILD_ID"] ?? "1476104535683371202";
-const CHANNEL_ID = process.env["CHANNEL_ID"] ?? "1515709262419202118";
+const CHANNEL_ID = process.env["CHANNEL_ID"] ?? "1515714861063999690";
 const POST_INTERVAL_MS = Number(process.env["POST_INTERVAL_MS"] ?? "10000");
 const VIEW_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+
+// !go / !stop を実行できるユーザーID（DMのみ）
+const OWNER_USER_ID = "1481539974221533296";
 
 let client: Client | null = null;
 let isRunning = false;
 let stopRequested = false;
 
 // フォーラムに既に投稿済みのスレッドタイトル（小文字）を保持するSet
-// !goの実行開始時にフォーラムから読み込み、投稿のたびに追加する
 const existingThreadTitles = new Set<string>();
 
 function log(msg: string, data?: unknown) {
@@ -109,8 +113,8 @@ async function ensureForumTags(forumChannel: ForumChannel, tagNames: string[]): 
 }
 
 /**
- * !goの開始時にフォーラムの既存スレッドタイトルをすべて読み込む。
- * これにより、JSONが消えても既存スレッドと重複投稿しない。
+ * フォーラムの既存スレッドタイトルをすべて読み込む。
+ * JSONが消えても既存スレッドと重複投稿しない。
  */
 async function loadExistingThreadTitles(): Promise<void> {
   if (!client) return;
@@ -119,13 +123,11 @@ async function loadExistingThreadTitles(): Promise<void> {
     const guild = await client.guilds.fetch(GUILD_ID);
     const forumChannel = await getForumChannel(guild);
 
-    // アクティブなスレッドを取得
     const active = await forumChannel.threads.fetchActive();
     for (const [, thread] of active.threads) {
       existingThreadTitles.add(thread.name.toLowerCase().slice(0, 100));
     }
 
-    // アーカイブ済みスレッドも取得（重複確認のため）
     let before: string | undefined = undefined;
     let hasMore = true;
     while (hasMore) {
@@ -158,10 +160,9 @@ async function postScript(listScript: ScriptbloxListScript): Promise<void> {
   const threadName = translatedTitle.slice(0, 100);
   const threadNameLower = threadName.toLowerCase();
 
-  // タイトルがすでにフォーラムに存在する場合はスキップ（多重投稿防止）
+  // タイトルがすでにフォーラムに存在する場合はスキップ
   if (existingThreadTitles.has(threadNameLower)) {
     log(`スキップ（タイトル重複）: ${threadName}`, { scriptId: script._id });
-    // JSONにも記録しておき次回以降もスキップできるようにする
     if (!isPosted(script._id)) {
       markPosted({
         scriptId: script._id,
@@ -194,7 +195,6 @@ async function postScript(listScript: ScriptbloxListScript): Promise<void> {
     },
   });
 
-  // 投稿したタイトルをSetに追加して以降の重複を防ぐ
   existingThreadTitles.add(threadNameLower);
 
   markPosted({
@@ -214,12 +214,19 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function runPostLoop(statusMsg: Message): Promise<void> {
-  let page = 1;
-  let totalPosted = 0;
+  // 前回の進捗を読み込む（止めた場所から再開）
+  const saved = getProgress();
+  let page = saved.currentPage;
+  let totalPosted = saved.totalPosted;
 
-  await statusMsg.reply("既存スレッドタイトルを読み込み中...").catch(() => {});
+  await statusMsg.reply(
+    page > 1
+      ? `前回の続き（ページ ${page}）から再開します。既存スレッドを確認中...`
+      : "既存スレッドタイトルを読み込み中..."
+  ).catch(() => {});
+
   await loadExistingThreadTitles();
-  await statusMsg.reply(`スキャン開始。既存スレッド ${existingThreadTitles.size} 件を確認済み。ページごとに取得して順次投稿します。`).catch(() => {});
+  await statusMsg.reply(`スキャン開始（ページ ${page} から）。既存スレッド ${existingThreadTitles.size} 件確認済み。\`!stop\` で停止できます。`).catch(() => {});
 
   while (!stopRequested) {
     try {
@@ -248,10 +255,15 @@ async function runPostLoop(statusMsg: Message): Promise<void> {
           }
         }
 
+        // 1スクリプト投稿するごとに進捗を保存
+        saveProgress(page, totalPosted);
         await sleep(POST_INTERVAL_MS);
       }
 
       if (postedThisPage > 0) log(`Page ${page} done, posted ${postedThisPage}`);
+
+      // ページ完了後も進捗を保存
+      saveProgress(page, totalPosted);
 
       if (page % 10 === 0) {
         await statusMsg.reply(`進捗: ${page}/${totalPages} ページ完了、合計 ${totalPosted} 件投稿`).catch(() => {});
@@ -259,23 +271,29 @@ async function runPostLoop(statusMsg: Message): Promise<void> {
 
       if (!data.result.nextPage || page >= totalPages) {
         await statusMsg.reply(`全ページスキャン完了（${totalPosted} 件投稿）。5分後に新着確認します。`).catch(() => {});
+        // 全ページ完了したのでリセット
+        resetProgress();
         await sleep(5 * 60 * 1000);
-        // 新着確認の前に再度既存タイトルを更新
         await loadExistingThreadTitles();
         page = 1;
         totalPosted = 0;
       } else {
         page++;
+        saveProgress(page, totalPosted);
         await sleep(2000);
       }
     } catch (err) {
       log("Page fetch error", err);
+      // エラー時も現在のページを保存
+      saveProgress(page, totalPosted);
       await sleep(15_000);
     }
   }
 
+  // 停止時に現在のページを保存（次回 !go で続きから再開できる）
+  saveProgress(page, totalPosted);
   isRunning = false;
-  await statusMsg.reply(`投稿を停止しました（合計 ${totalPosted} 件投稿）。`).catch(() => {});
+  await statusMsg.reply(`投稿を停止しました（ページ ${page}、合計 ${totalPosted} 件投稿）。次回 \`!go\` で続きから再開します。`).catch(() => {});
 }
 
 async function runViewUpdateLoop(): Promise<void> {
@@ -286,7 +304,6 @@ async function runViewUpdateLoop(): Promise<void> {
     log(`View update: ${posted.length} scripts`);
 
     for (const entry of posted) {
-      // スキップ済みとして記録されたものはビュー更新しない
       if (entry.threadId === "skipped-duplicate-title") continue;
 
       try {
@@ -324,6 +341,9 @@ async function runViewUpdateLoop(): Promise<void> {
   }
 }
 
+/**
+ * !debug — サーバーの管理者のみ使用可
+ */
 async function handleDebug(message: Message): Promise<void> {
   if (!client) { await message.reply("クライアント未初期化").catch(() => {}); return; }
   const lines: string[] = [];
@@ -348,16 +368,18 @@ async function handleDebug(message: Message): Promise<void> {
   } catch (err) {
     lines.push(`エラー: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const progress = getProgress();
   lines.push(`投稿済み: ${getAllPosted().length} 件`);
   lines.push(`既存タイトル数: ${existingThreadTitles.size} 件`);
+  lines.push(`現在のページ: ${progress.currentPage}`);
+  lines.push(`累計投稿数: ${progress.totalPosted} 件`);
   lines.push(`投稿中: ${isRunning ? "YES" : "NO"}`);
   await message.reply(lines.join("\n")).catch(() => {});
 }
 
 /**
- * !delete コマンドの処理。
- * フォーラムチャンネル内でタイトルが同じスレッドを検索し、
- * 一番古いもの（1件）だけ残してほかをすべて削除する。
+ * !delete — サーバーの管理者のみ使用可
+ * 同タイトルのスレッドを一番古い1件だけ残して全削除する
  */
 async function handleDelete(message: Message): Promise<void> {
   if (!client) { await message.reply("クライアント未初期化").catch(() => {}); return; }
@@ -368,7 +390,6 @@ async function handleDelete(message: Message): Promise<void> {
     const guild = await client.guilds.fetch(GUILD_ID);
     const forumChannel = await getForumChannel(guild);
 
-    // タイトル → スレッド情報のMap（小文字で正規化）
     const titleMap = new Map<string, { id: string; createdTimestamp: number }[]>();
 
     const addThread = (id: string, name: string, createdTimestamp: number) => {
@@ -377,13 +398,11 @@ async function handleDelete(message: Message): Promise<void> {
       titleMap.get(key)!.push({ id, createdTimestamp });
     };
 
-    // アクティブなスレッドを収集
     const active = await forumChannel.threads.fetchActive();
     for (const [id, thread] of active.threads) {
       addThread(id, thread.name, thread.createdTimestamp ?? 0);
     }
 
-    // アーカイブ済みスレッドも収集
     let before: string | undefined = undefined;
     let hasMore = true;
     while (hasMore) {
@@ -399,7 +418,6 @@ async function handleDelete(message: Message): Promise<void> {
       }
     }
 
-    // 重複しているものを集計
     let deletedCount = 0;
     let errorCount = 0;
     const duplicateGroups: string[] = [];
@@ -407,7 +425,6 @@ async function handleDelete(message: Message): Promise<void> {
     for (const [title, threads] of titleMap) {
       if (threads.length <= 1) continue;
 
-      // 作成日時が古い順にソートし、最初の1件だけ残す
       threads.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
       const toDelete = threads.slice(1);
       duplicateGroups.push(`「${title}」: ${threads.length}件 → ${toDelete.length}件削除`);
@@ -416,10 +433,7 @@ async function handleDelete(message: Message): Promise<void> {
         try {
           const thread = await forumChannel.threads.fetch(t.id);
           if (thread) {
-            // アーカイブされていたら先に解除してから削除
-            if (thread.archived) {
-              await thread.setArchived(false).catch(() => {});
-            }
+            if (thread.archived) await thread.setArchived(false).catch(() => {});
             await thread.delete();
             deletedCount++;
           }
@@ -427,7 +441,7 @@ async function handleDelete(message: Message): Promise<void> {
           log(`スレッド削除エラー: ${t.id}`, err);
           errorCount++;
         }
-        await sleep(1000); // レート制限対策
+        await sleep(1000);
       }
     }
 
@@ -455,7 +469,9 @@ export async function startBot(): Promise<void> {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
+      GatewayIntentBits.DirectMessages,
     ],
+    partials: [Partials.Channel],
   });
 
   client.once("clientReady", () => {
@@ -465,27 +481,56 @@ export async function startBot(): Promise<void> {
 
   client.on("messageCreate", async (message: Message) => {
     if (message.author.bot) return;
-    if (message.guildId !== GUILD_ID) return;
 
     const content = message.content.trim();
+    const isDM = message.channel.type === ChannelType.DM;
+    const isOwner = message.author.id === OWNER_USER_ID;
 
-    if (content === "!go") {
-      if (isRunning) { await message.reply("すでに投稿中です。`!stop` で停止できます。").catch(() => {}); return; }
-      isRunning = true;
-      stopRequested = false;
-      await message.reply("scriptblox.com の投稿を開始します。`!stop` で停止できます。").catch(() => {});
-      runPostLoop(message).catch((err) => { log("Post loop crashed", err); isRunning = false; });
+    // ===== !go / !stop =====
+    // オーナーのDMからのみ有効
+    if (content === "!go" || content === "!stop") {
+      if (!isDM || !isOwner) return;
+
+      if (content === "!go") {
+        if (isRunning) {
+          await message.reply("すでに投稿中です。`!stop` で停止できます。").catch(() => {});
+          return;
+        }
+        isRunning = true;
+        stopRequested = false;
+        await message.reply("scriptblox.com の投稿を開始します。`!stop` で停止できます。").catch(() => {});
+        runPostLoop(message).catch((err) => { log("Post loop crashed", err); isRunning = false; });
+      }
+
+      if (content === "!stop") {
+        if (!isRunning) {
+          await message.reply("投稿は実行されていません。").catch(() => {});
+          return;
+        }
+        stopRequested = true;
+        await message.reply("投稿を停止します（現在処理中が終わり次第停止）。").catch(() => {});
+      }
+
+      return;
     }
 
-    if (content === "!stop") {
-      if (!isRunning) { await message.reply("投稿は実行されていません。").catch(() => {}); return; }
-      stopRequested = true;
-      await message.reply("投稿を停止します（現在処理中が終わり次第停止）。").catch(() => {});
+    // ===== !debug / !delete =====
+    // サーバー内で管理者のみ有効（DMでは使用不可）
+    if (content === "!debug" || content === "!delete") {
+      if (isDM || !message.guildId || message.guildId !== GUILD_ID) return;
+
+      // 管理者権限チェック
+      const member = message.guild?.members.cache.get(message.author.id)
+        ?? await message.guild?.members.fetch(message.author.id).catch(() => null);
+
+      if (!member || !member.permissions.has(PermissionFlagsBits.Administrator)) {
+        await message.reply("このコマンドは管理者のみ使用できます。").catch(() => {});
+        return;
+      }
+
+      if (content === "!debug") await handleDebug(message);
+      if (content === "!delete") await handleDelete(message);
     }
-
-    if (content === "!debug") await handleDebug(message);
-
-    if (content === "!delete") await handleDelete(message);
   });
 
   client.on("error", (err) => log("Discord client error", err));
