@@ -16,6 +16,10 @@ export interface PostedScript {
 interface StoreData {
   postedScripts: Record<string, PostedScript>;
   lastChecked: string | null;
+  progress: {
+    currentPage: number;
+    totalPosted: number;
+  };
 }
 
 function ensureDataDir() {
@@ -24,11 +28,13 @@ function ensureDataDir() {
 
 function loadStore(): StoreData {
   ensureDataDir();
-  if (!fs.existsSync(STORE_FILE)) return { postedScripts: {}, lastChecked: null };
+  if (!fs.existsSync(STORE_FILE)) return { postedScripts: {}, lastChecked: null, progress: { currentPage: 1, totalPosted: 0 } };
   try {
-    return JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as StoreData;
+    const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as StoreData;
+    if (!data.progress) data.progress = { currentPage: 1, totalPosted: 0 };
+    return data;
   } catch {
-    return { postedScripts: {}, lastChecked: null };
+    return { postedScripts: {}, lastChecked: null, progress: { currentPage: 1, totalPosted: 0 } };
   }
 }
 
@@ -59,4 +65,20 @@ export function updateViews(scriptId: string, views: number) {
     store.postedScripts[scriptId]!.lastViewUpdate = new Date().toISOString();
     saveStore(store);
   }
+}
+
+export function saveProgress(currentPage: number, totalPosted: number) {
+  const store = loadStore();
+  store.progress = { currentPage, totalPosted };
+  saveStore(store);
+}
+
+export function getProgress(): { currentPage: number; totalPosted: number } {
+  return loadStore().progress;
+}
+
+export function resetProgress() {
+  const store = loadStore();
+  store.progress = { currentPage: 1, totalPosted: 0 };
+  saveStore(store);
 }
