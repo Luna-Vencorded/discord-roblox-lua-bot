@@ -1,55 +1,35 @@
-# Discord Roblox Lua Bot
+# Scriptblox Discord Bot
 
-Roblox Luaスクリプト検索・AI支援Discord Bot
+scriptblox.com のスクリプトを Discord フォーラムチャンネルに自動投稿するボット。
 
-## 機能
+## 環境変数
 
-- `!search_スクリプト名` — ScriptBloxからスクリプト検索
-- `/search` — スラッシュコマンドで検索（フィルター付き）
-- `/latest` — 最新スクリプト一覧
-- `/hub` — Script Hub専用検索
-- `/obfuscate` — Luaコード難読化
-- `/deobfuscate` — 難読化コードの解読
-- `/explain` — スクリプトの日本語解説
-- `/fix` — バグ修正
-- `/aichat` — AIに質問
-- `/aiset` / `/aioff` — AI自動応答のオン/オフ
-- `/keyinfo` — Keyシステム情報確認
-- `/status` — Bot状態確認
-- 新着スクリプト自動通知（2分おき）
+| 変数名 | 必須 | 説明 |
+|--------|------|------|
+| `DISCORD_BOT_TOKEN` | ✅ | Discord ボットトークン |
+| `OPENROUTER_API_KEY` | 任意 | 日本語翻訳用 (なければ英語のまま) |
+| `GUILD_ID` | 任意 | デフォルト: `1476104535683371202` |
+| `CHANNEL_ID` | 任意 | デフォルト: `1515622353114107984` |
+| `POST_INTERVAL_MS` | 任意 | 投稿間隔ms (デフォルト: `10000`) |
 
-## Railway デプロイ手順
+## コマンド
 
-### 1. Railway にサインイン
-[railway.app](https://railway.app) でアカウント作成 or ログイン
+| コマンド | 説明 |
+|---------|------|
+| `!go` | 投稿開始 |
+| `!stop` | 投稿停止 |
+| `!debug` | チャンネル・権限確認 |
 
-### 2. 新規プロジェクト作成
-- `New Project` → `Deploy from GitHub repo` → このリポジトリを選択
+## Railway へのデプロイ
 
-### 3. 環境変数を設定
-Railway のプロジェクト設定 → `Variables` に以下を追加:
+1. このリポジトリを Railway に接続
+2. 環境変数を設定（`DISCORD_BOT_TOKEN`, `OPENROUTER_API_KEY`）
+3. 自動でビルド・起動されます
 
-| 変数名 | 説明 |
-|--------|------|
-| `DISCORD_BOT_TOKEN` | Discord Developer Portal のBotトークン |
-| `GROQ_API_KEY` | Groq API キー |
-| `GEMINI_API_KEY` | Google Gemini API キー |
-| `GITHUB_TOKEN` | GitHub Personal Access Token（任意） |
+## 動作
 
-### 4. デプロイ
-環境変数を設定後、自動でビルド・起動します。
-
-## 対応サーバー・チャンネル
-
-- サーバーID: `1490495338296115364`
-- 検索チャンネル: `1510354846111371377`
-- AIチャンネル: `1511176152964923493`
-- 通知チャンネル: `1511170667414818857`
-
-## 技術スタック
-
-- Node.js + TypeScript
-- discord.js v14
-- Groq SDK (llama-3.3-70b)
-- Google Gemini 1.5 Flash
-- ScriptBlox API
+- scriptblox.com を全ページスキャンして未投稿スクリプトを順次投稿（10秒間隔）
+- タイトル・説明を日本語に翻訳
+- ゲーム名・Universal・Key・Patched などのタグを自動付与
+- 1時間ごとに閲覧数を更新
+- 投稿済みは `data/posted_scripts.json` で管理（重複投稿なし）
