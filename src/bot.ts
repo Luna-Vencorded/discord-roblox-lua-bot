@@ -12,11 +12,43 @@ import {
 const GUILD_ID = process.env["GUILD_ID"] ?? "1476104535683371202";
 const VERIFY_CHANNEL_ID = "1515354201419546694";
 const VERIFY_ROLE_ID = "1488884755817566349";
+const VERIFY_EMOJI_ID = "1438065148614017119";
 
 let client: Client | null = null;
+// 起動時にDiscord APIからemoji名を取得して置き換える（取得失敗時は✅にフォールバック）
+let verifyEmoji = "✅";
 
 function log(msg: string, data?: unknown) {
   console.log(`[${new Date().toISOString()}] ${msg}`, data ?? "");
+}
+
+/**
+ * Discord Developer Portal で作成したアプリケーション絵文字を取得する。
+ * 取得できれば <:name:id> 形式の文字列を返す。
+ */
+async function loadVerifyEmoji(clientId: string, token: string): Promise<void> {
+  const rest = new REST({ version: "10" }).setToken(token);
+  try {
+    // アプリケーション絵文字として取得を試みる
+    const emoji = await rest.get(
+      `/applications/${clientId}/emojis/${VERIFY_EMOJI_ID}`
+    ) as { name: string; id: string; animated?: boolean };
+    const prefix = emoji.animated ? "a" : "";
+    verifyEmoji = `<${prefix}:${emoji.name}:${emoji.id}>`;
+    log(`絵文字を読み込みました: ${verifyEmoji}`);
+  } catch {
+    // アプリケーション絵文字で取得できなければギルド絵文字を試みる
+    try {
+      const emoji = await rest.get(
+        `/guilds/${GUILD_ID}/emojis/${VERIFY_EMOJI_ID}`
+      ) as { name: string; id: string; animated?: boolean };
+      const prefix = emoji.animated ? "a" : "";
+      verifyEmoji = `<${prefix}:${emoji.name}:${emoji.id}>`;
+      log(`ギルド絵文字を読み込みました: ${verifyEmoji}`);
+    } catch (err) {
+      log("絵文字の取得に失敗しました。✅ にフォールバックします。", err);
+    }
+  }
 }
 
 const commands = [
@@ -46,7 +78,7 @@ async function grantVerifyRole(member: GuildMember, reply: (msg: string) => Prom
   }
   try {
     await member.roles.add(VERIFY_ROLE_ID);
-    await reply("✅ 認証完了！ロールが付与されました。");
+    await reply(`${verifyEmoji} 認証完了！ロールが付与されました。`);
     log(`Verified: ${member.user.tag} (${member.user.id})`);
   } catch (err) {
     log("ロール付与に失敗しました", err);
@@ -75,7 +107,7 @@ async function handleSlashVerify(interaction: ChatInputCommandInteraction): Prom
   );
 }
 
-// プレフィックスコマンド .tag verify
+// プレフィックスコマンド !verify
 async function handlePrefixVerify(message: Message): Promise<void> {
   if (message.channelId !== VERIFY_CHANNEL_ID) return;
   if (!message.guild || !message.member) return;
@@ -103,7 +135,10 @@ export async function startBot(): Promise<void> {
 
   client.once("clientReady", async (c) => {
     log(`Bot ready: ${c.user.tag}`);
-    await registerCommands(c.user.id, token);
+    await Promise.all([
+      registerCommands(c.user.id, token),
+      loadVerifyEmoji(c.user.id, token),
+    ]);
   });
 
   // スラッシュコマンド
@@ -119,7 +154,7 @@ export async function startBot(): Promise<void> {
     }
   });
 
-  // プレフィックスコマンド (.tag verify)
+  // プレフィックスコマンド (!verify)
   client.on("messageCreate", async (message: Message) => {
     if (message.author.bot) return;
     const content = message.content.trim().toLowerCase();
