@@ -123,7 +123,7 @@ export async function startBot(): Promise<void> {
   client.on("messageCreate", async (message: Message) => {
     if (message.author.bot) return;
     const content = message.content.trim().toLowerCase();
-    if (content === ".tag verify") {
+    if (content === "!verify") {
       await handlePrefixVerify(message).catch((err) =>
         log("handlePrefixVerify error", err)
       );
