@@ -6,6 +6,7 @@ import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
   GuildMember,
+  type Message,
 } from "discord.js";
 
 const GUILD_ID = process.env["GUILD_ID"] ?? "1476104535683371202";
@@ -23,9 +24,7 @@ const commands = [
     .setName("tag")
     .setDescription("タグコマンド")
     .addSubcommand((sub) =>
-      sub
-        .setName("verify")
-        .setDescription("認証してロールを取得します")
+      sub.setName("verify").setDescription("認証してロールを取得します")
     ),
 ].map((cmd) => cmd.toJSON());
 
@@ -40,11 +39,26 @@ async function registerCommands(clientId: string, token: string): Promise<void> 
   }
 }
 
-async function handleVerify(interaction: ChatInputCommandInteraction): Promise<void> {
-  // 指定チャンネル以外では使用不可
+async function grantVerifyRole(member: GuildMember, reply: (msg: string) => Promise<void>): Promise<void> {
+  if (member.roles.cache.has(VERIFY_ROLE_ID)) {
+    await reply("すでに認証済みです。");
+    return;
+  }
+  try {
+    await member.roles.add(VERIFY_ROLE_ID);
+    await reply("✅ 認証完了！ロールが付与されました。");
+    log(`Verified: ${member.user.tag} (${member.user.id})`);
+  } catch (err) {
+    log("ロール付与に失敗しました", err);
+    await reply("ロールの付与に失敗しました。ボットに「ロールの管理」権限があるか確認してください。");
+  }
+}
+
+// スラッシュコマンド /tag verify
+async function handleSlashVerify(interaction: ChatInputCommandInteraction): Promise<void> {
   if (interaction.channelId !== VERIFY_CHANNEL_ID) {
     await interaction.reply({
-      content: "このコマンドは <#" + VERIFY_CHANNEL_ID + "> でのみ使用できます。",
+      content: `このコマンドは <#${VERIFY_CHANNEL_ID}> でのみ使用できます。`,
       ephemeral: true,
     });
     return;
@@ -56,26 +70,19 @@ async function handleVerify(interaction: ChatInputCommandInteraction): Promise<v
     return;
   }
 
-  // 既にロールを持っている場合
-  if (member.roles.cache.has(VERIFY_ROLE_ID)) {
-    await interaction.reply({ content: "すでに認証済みです。", ephemeral: true });
-    return;
-  }
+  await grantVerifyRole(member, (msg) =>
+    interaction.reply({ content: msg, ephemeral: true })
+  );
+}
 
-  try {
-    await member.roles.add(VERIFY_ROLE_ID);
-    await interaction.reply({
-      content: "✅ 認証完了！ロールが付与されました。",
-      ephemeral: true,
-    });
-    log(`Verified: ${member.user.tag} (${member.user.id})`);
-  } catch (err) {
-    log("ロール付与に失敗しました", err);
-    await interaction.reply({
-      content: "ロールの付与に失敗しました。ボットに「ロールの管理」権限があるか確認してください。",
-      ephemeral: true,
-    });
-  }
+// プレフィックスコマンド .tag verify
+async function handlePrefixVerify(message: Message): Promise<void> {
+  if (message.channelId !== VERIFY_CHANNEL_ID) return;
+  if (!message.guild || !message.member) return;
+
+  await grantVerifyRole(message.member, async (msg) => {
+    await message.reply(msg).catch(() => {});
+  });
 }
 
 export async function startBot(): Promise<void> {
@@ -89,6 +96,8 @@ export async function startBot(): Promise<void> {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
     ],
   });
 
@@ -97,15 +106,26 @@ export async function startBot(): Promise<void> {
     await registerCommands(c.user.id, token);
   });
 
+  // スラッシュコマンド
   client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
-
     if (
       interaction.commandName === "tag" &&
       interaction.options.getSubcommand() === "verify"
     ) {
-      await handleVerify(interaction).catch((err) =>
-        log("handleVerify error", err)
+      await handleSlashVerify(interaction).catch((err) =>
+        log("handleSlashVerify error", err)
+      );
+    }
+  });
+
+  // プレフィックスコマンド (.tag verify)
+  client.on("messageCreate", async (message: Message) => {
+    if (message.author.bot) return;
+    const content = message.content.trim().toLowerCase();
+    if (content === ".tag verify") {
+      await handlePrefixVerify(message).catch((err) =>
+        log("handlePrefixVerify error", err)
       );
     }
   });
