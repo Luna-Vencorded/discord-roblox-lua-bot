@@ -39,7 +39,7 @@ async function registerCommands(clientId: string, token: string): Promise<void> 
   }
 }
 
-async function grantVerifyRole(member: GuildMember, reply: (msg: string) => Promise<void>): Promise<void> {
+async function grantVerifyRole(member: GuildMember, reply: (msg: string) => Promise<unknown>): Promise<void> {
   if (member.roles.cache.has(VERIFY_ROLE_ID)) {
     await reply("すでに認証済みです。");
     return;
