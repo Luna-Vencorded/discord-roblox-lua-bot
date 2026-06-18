@@ -12,7 +12,7 @@ import {
 const GUILD_ID = process.env["GUILD_ID"] ?? "1476104535683371202";
 const VERIFY_CHANNEL_ID = "1515354201419546694";
 const VERIFY_ROLE_ID = "1488884755817566349";
-const VERIFY_EMOJI_ID = "1438065148614017119";
+const VERIFY_EMOJI_ID = "1517128520466174015";
 
 let client: Client | null = null;
 // 起動時にDiscord APIからemoji名を取得して置き換える（取得失敗時は✅にフォールバック）
